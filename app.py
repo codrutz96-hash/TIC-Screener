@@ -2,10 +2,11 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import requests
+import io  # <--- Linie nouă
 
 st.set_page_config(page_title="Pattern Screener Pro", layout="wide")
 
-# --- FUNCȚIE OBȚINERE TICKERE (VARIANTA STABILĂ) ---
+# --- FUNCȚIE OBȚINERE TICKERE (VARIANTA REPARATĂ) ---
 @st.cache_data
 def get_tickers(market):
     headers = {
@@ -15,21 +16,21 @@ def get_tickers(market):
         if market == "S&P 500":
             url = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
             response = requests.get(url, headers=headers)
-            df = pd.read_html(response.text)[0]
+            # Folosim io.StringIO pentru a evita eroarea de citire
+            df = pd.read_html(io.StringIO(response.text))[0]
             return df['Symbol'].tolist()
             
         elif market == "NASDAQ 100":
             url = 'https://en.wikipedia.org/wiki/Nasdaq-100'
             response = requests.get(url, headers=headers)
-            df = pd.read_html(response.text)[4]
-            # Unelor coloane le zice 'Ticker', altora 'Symbol'
+            df = pd.read_html(io.StringIO(response.text))[4]
             col = 'Ticker' if 'Ticker' in df.columns else 'Symbol'
             return df[col].tolist()
             
         elif market == "Dow Jones":
             url = 'https://en.wikipedia.org/wiki/Dow_Jones_Industrial_Average'
             response = requests.get(url, headers=headers)
-            df = pd.read_html(response.text)[1]
+            df = pd.read_html(io.StringIO(response.text))[1]
             return df['Symbol'].tolist()
     except Exception as e:
         st.error(f"Eroare la preluarea listei {market}: {e}")
