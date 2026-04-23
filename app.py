@@ -1,123 +1,137 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
+import pandas_ta as ta
 import requests
-import io  # <--- Linie nouă
+import io
 
-st.set_page_config(page_title="Pattern Screener Pro", layout="wide")
+st.set_page_config(page_title="Master Pro v7.0 Screener", layout="wide")
 
-# --- FUNCȚIE OBȚINERE TICKERE (VARIANTA REPARATĂ) ---
+# --- FUNCȚII SUPORT ---
 @st.cache_data
 def get_tickers(market):
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+    headers = {"User-Agent": "Mozilla/5.0"}
+    urls = {
+        "S&P 500": "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies",
+        "NASDAQ 100": "https://en.wikipedia.org/wiki/Nasdaq-100",
+        "Dow Jones": "https://en.wikipedia.org/wiki/Dow_Jones_Industrial_Average"
     }
     try:
-        if market == "S&P 500":
-            url = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
-            response = requests.get(url, headers=headers)
-            # Folosim io.StringIO pentru a evita eroarea de citire
-            df = pd.read_html(io.StringIO(response.text))[0]
-            return df['Symbol'].tolist()
-            
-        elif market == "NASDAQ 100":
-            url = 'https://en.wikipedia.org/wiki/Nasdaq-100'
-            response = requests.get(url, headers=headers)
-            df = pd.read_html(io.StringIO(response.text))[4]
-            col = 'Ticker' if 'Ticker' in df.columns else 'Symbol'
-            return df[col].tolist()
-            
-        elif market == "Dow Jones":
-            url = 'https://en.wikipedia.org/wiki/Dow_Jones_Industrial_Average'
-            response = requests.get(url, headers=headers)
-            df = pd.read_html(io.StringIO(response.text))[1]
-            return df['Symbol'].tolist()
-    except Exception as e:
-        st.error(f"Eroare la preluarea listei {market}: {e}")
-        return []
-    return []
+        res = requests.get(urls[market], headers=headers)
+        idx = 0 if market == "S&P 500" else (4 if market == "NASDAQ 100" else 1)
+        df = pd.read_html(io.StringIO(res.text))[idx]
+        col = 'Symbol' if 'Symbol' in df.columns else 'Ticker'
+        return df[col].tolist()
+    except: return []
 
-# --- LOGICA DE DETECȚIE PATTERN (CERINȚA TA) ---
-def scan_pattern(df, ticker):
-    if len(df) < 4:
-        return None
+def get_ftfc_status(ticker):
+    """Calculează continuitatea pe D, W, M"""
+    try:
+        # Luăm date pentru Monthly și Weekly
+        d_m = yf.download(ticker, period="6mo", interval="1mo", progress=False).iloc[-1]
+        d_w = yf.download(ticker, period="3mo", interval="1wk", progress=False).iloc[-1]
+        
+        m_dir = 1 if d_m['Close'] > d_m['Open'] else -1
+        w_dir = 1 if d_w['Close'] > d_w['Open'] else -1
+        
+        return m_dir, w_dir
+    except: return 0, 0
+
+# --- LOGICA DE SEMNAL (PINE SCRIPT PORT) ---
+def scan_logic(df, ticker, direction, use_ftfc):
+    if len(df) < 25: return None
     
-    # Ultimele 4 lumânări: c1 (veche) -> c4 (cea mai recentă/azi)
-    c1 = df.iloc[-4]
+    # Calcul EMA 20 (Filter MA)
+    df['ema20'] = ta.ema(df['Close'], length=20)
+    
+    # Ultimele lumânări
+    c = df.iloc[-1]   # c0
+    c1 = df.iloc[-2]  
     c2 = df.iloc[-3]
-    c3 = df.iloc[-2]
-    c4 = df.iloc[-1]
+    c3 = df.iloc[-4]  # c3 în Pine
+    
+    is_red = lambda row: row['Close'] < row['Open']
+    is_green = lambda row: row['Close'] > row['Open']
 
-    # 1. C1 Roșie (Close < Open)
-    is_red1 = c1['Close'] < c1['Open']
-    # 2. C2 Roșie (Close < Open)
-    is_red2 = c2['Close'] < c2['Open']
-    # 3. C3 Verde (Close > Open)
-    is_green3 = c3['Close'] > c3['Open']
-    # 4. C4 Verde (Close > Open)
-    is_green4 = c4['Close'] > c4['Open']
-    # 5. C4 Close > C1 High (Breakout)
-    breakout = c4['Close'] > c1['High']
+    signal = False
+    
+    if direction == "LONG":
+        # Logica Pine: is_red(3) and is_red(2) and is_green(1) and is_green(0)
+        pattern = is_red(c3) and is_red(c2) and is_green(c1) and is_green(c)
+        breakout = c['Close'] > c3['Open'] # Close[0] > Open[3]
+        # Primer Filter: high[1] < ma or high[2] < ma
+        primer = c1['High'] < c1['ema20'] or c2['High'] < c2['ema20']
+        
+        if pattern and breakout and primer:
+            signal = True
 
-    if is_red1 and is_red2 and is_green3 and is_green4 and breakout:
+    else: # SHORT
+        pattern = is_green(c3) and is_green(c2) and is_red(c1) and is_red(c)
+        breakout = c['Close'] < c3['Open'] # Close[0] < Open[3]
+        primer = c1['Low'] > c1['ema20'] or c2['Low'] > c2['ema20']
+        
+        if pattern and breakout and primer:
+            signal = True
+
+    if signal:
+        ftfc_text = "N/A"
+        if use_ftfc:
+            m_dir, w_dir = get_ftfc_status(ticker)
+            d_dir = 1 if is_green(c) else -1
+            
+            # Verificăm dacă D, W și M sunt în aceeași direcție
+            if direction == "LONG" and not (m_dir == 1 and w_dir == 1 and d_dir == 1):
+                return None
+            if direction == "SHORT" and not (m_dir == -1 and w_dir == -1 and d_dir == -1):
+                return None
+            ftfc_text = "✅ Full Continuity"
+
         return {
             "Ticker": ticker,
-            "Pret Actual": round(float(c4['Close']), 2),
-            "High C1 (Barieră)": round(float(c1['High']), 2),
-            "Evoluție Azi %": round(((float(c4['Close']) / float(c4['Open'])) - 1) * 100, 2)
+            "Preț": round(c['Close'], 2),
+            "FTFC": ftfc_text,
+            "Timeframe": "Selected"
         }
     return None
 
-# --- UI STREAMLIT ---
-st.title("🕯️ 4-Candle Reversal Screener")
-st.markdown("Căutăm pattern-ul: :red[Roșu] → :red[Roșu] → :green[Verde] → :green[Verde (Breakout)]")
+# --- INTERFAȚA ---
+st.title("🛡️ Master Pro v7.0 Stock Screener")
 
 with st.sidebar:
-    st.header("Setări")
-    market_choice = st.selectbox("Alege Piața", ["S&P 500", "NASDAQ 100", "Dow Jones"])
-    limit_scan = st.slider("Limită de scanare (pentru viteză)", 10, 500, 100)
+    st.header("Configurare Semnal")
+    mode = st.radio("Direcție", ["LONG", "SHORT"])
+    tf_base = st.selectbox("Timeframe Principal", ["1d", "1wk", "4h", "1h"])
+    market = st.selectbox("Piața", ["S&P 500", "NASDAQ 100", "Dow Jones"])
+    
     st.divider()
-    st.write("Aplicația verifică dacă prețul actual a depășit maximul primei lumânări roșii din grup.")
+    apply_ftfc = st.checkbox("Activează FTFC Filter (D+W+M)", value=True)
+    limit = st.slider("Nr. Companii de scanat", 10, 500, 50)
 
-if st.button("🚀 Lansează Scanarea"):
-    tickers = get_tickers(market_choice)
-    tickers = [t.replace('.', '-') for t in tickers] # Corecție pentru simboluri tip BRK.B
-    
+if st.button(f"Scanează {market} pentru {mode}"):
+    tickers = get_tickers(market)[:limit]
     results = []
-    progress_bar = st.progress(0)
-    status_text = st.empty()
     
-    # Batch download pentru performanță
-    batch_size = 30
-    tickers_to_scan = tickers[:limit_scan]
+    prog = st.progress(0)
+    status = st.empty()
     
-    for i in range(0, len(tickers_to_scan), batch_size):
-        batch = tickers_to_scan[i : i + batch_size]
-        status_text.text(f"Analizăm {i} - {i+len(batch)} din {len(tickers_to_scan)}...")
+    for i, t in enumerate(tickers):
+        t = t.replace('.', '-')
+        status.text(f"Analizăm {t}...")
         
-        try:
-            # Descărcăm ultimele 10 zile
-            data = yf.download(batch, period="10d", interval="1d", group_by='ticker', progress=False)
-            
-            for ticker in batch:
-                if len(batch) > 1:
-                    df_ticker = data[ticker].dropna()
-                else:
-                    df_ticker = data.dropna()
-                
-                match = scan_pattern(df_ticker, ticker)
-                if match:
-                    results.append(match)
-        except Exception as e:
-            continue
-            
-        progress_bar.progress((i + len(batch)) / len(tickers_to_scan))
-
-    status_text.success("Scanare finalizată!")
-
+        # Luăm date în funcție de timeframe-ul ales
+        period = "60d" if "h" in tf_base else "2y"
+        df = yf.download(t, period=period, interval=tf_base, progress=False)
+        
+        if not df.empty:
+            match = scan_logic(df, t, mode, apply_ftfc)
+            if match:
+                results.append(match)
+        
+        prog.progress((i + 1) / len(tickers))
+    
+    status.empty()
     if results:
-        st.balloons()
-        st.subheader(f"🎯 Rezultate Găsite ({len(results)})")
+        st.success(f"Am găsit {len(results)} oportunități!")
         st.table(pd.DataFrame(results))
     else:
-        st.info("Nicio acțiune nu respectă pattern-ul în acest moment.")
+        st.warning("Niciun semnal găsit conform criteriilor.")
