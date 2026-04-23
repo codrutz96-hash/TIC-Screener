@@ -1,7 +1,6 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
-import pandas_ta as ta
 import requests
 import io
 
@@ -56,8 +55,8 @@ def get_ftfc_status(ticker):
 def scan_logic(df, ticker, direction, use_ftfc):
     if len(df) < 25: return None
     
-    # Calcul EMA 20 (Filter MA din scriptul tău)
-    df['ema20'] = ta.ema(df['Close'], length=20)
+    # Calcul EMA 20 nativ in Pandas (fara pandas_ta)
+    df['ema20'] = df['Close'].ewm(span=20, adjust=False).mean()
     
     # Ultimele lumânări (index -1 este prezentul)
     c0 = df.iloc[-1]
