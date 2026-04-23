@@ -3,4 +3,3 @@ yfinance
 pandas
 lxml
 requests
-pandas_ta
